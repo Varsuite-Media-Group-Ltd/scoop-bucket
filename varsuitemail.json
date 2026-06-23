@@ -1,0 +1,16 @@
+{
+  "version": "1.2.1",
+  "description": "Local email testing for developers",
+  "homepage": "https://varsuite.co.uk",
+  "license": "Proprietary",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Varsuite-Media-Group-Ltd/varsuitemail-releases/releases/download/v1.2.1/VarsuiteMail-Setup.exe",
+      "hash": "8684e37b5599a7a217436b2591191acabd0c3ad5885caeb089f73afa97768876"
+    }
+  },
+  "installer": {
+    "args": ["/S"]
+  },
+  "pre_uninstall": "Start-Process -Wait -FilePath \"$env:LOCALAPPDATA\\Programs\\varsuitemail\\Uninstall VarsuiteMail.exe\" -ArgumentList '/S'"
+}

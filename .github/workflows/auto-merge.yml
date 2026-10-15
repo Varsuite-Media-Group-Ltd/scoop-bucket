@@ -1,0 +1,87 @@
+name: Auto-merge
+
+# Queues a squash merge so that finishing a change is the last manual step.
+#
+# This file is deliberately NOT part of ci.yml. For `pull_request` events GitHub
+# runs workflows from the pull request's own head, so a job living there is
+# defined by the branch it is about to merge. A branch could rewrite qa and
+# ai-review into no-op jobs that still emit the required check names, then queue
+# its own merge, and the ruleset on main would be satisfied by jobs that checked
+# nothing.
+#
+# `pull_request_target` evaluates this file on the BASE branch instead, so a
+# pull request cannot edit the thing that decides to merge it.
+#
+# Nothing below checks out or runs pull request code. pull_request_target grants
+# a write token, and checking out the head would hand that token to whatever the
+# branch happens to contain.
+
+on:
+  pull_request_target:
+    # ready_for_review matters: without it, a pull request opened as a draft and
+    # later marked ready never gets auto-merge queued and sits green forever.
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Not named auto-merge: dependabot-auto-merge.yml already has a job by that
+  # name in most repositories, and two checks sharing a name makes the status
+  # list ambiguous and a ruleset reference unpredictable.
+  queue-merge:
+    # Draft is the opt-out.
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+
+    steps:
+      - name: Does this pull request change the pipeline?
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Required status checks are matched by NAME. A pull request that can
+          # edit .github/ can still publish a check called "qa / qa" from a job
+          # that does nothing, so moving this workflow to the base branch is not
+          # on its own enough. Changes under .github/ need a human to merge them.
+          files="$(gh api --paginate "repos/${REPO}/pulls/${PR}/files" --jq '.[].filename')"
+          if printf '%s\n' "$files" | grep -qE '^\.github/'; then
+            echo "::notice title=Auto-merge skipped::This pull request changes .github/, so it must be reviewed and merged by a human."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Queue squash merge for when the required checks pass
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -uo pipefail
+          # --auto only queues: the ruleset still requires qa / qa and
+          # ai-review / review, so a red pipeline or a critical/high finding
+          # leaves the pull request open until it is fixed and pushed again.
+          if out="$(gh pr merge --auto --squash "$PR_URL" 2>&1)"; then
+            echo "::notice title=Auto-merge queued::Squash merge will happen once the required checks pass."
+            exit 0
+          fi
+          # Being already queued or already merged is not a failure. Anything
+          # else is, and must not be swallowed: a silent failure here leaves the
+          # pull request sitting unmerged, which is the outcome this prevents.
+          case "$out" in
+            *already*|*"Pull request is already"*)
+              echo "::notice title=Auto-merge already set::${out}" ;;
+            *)
+              echo "::error title=Auto-merge could not be queued::${out}"
+              exit 1 ;;
+          esac
